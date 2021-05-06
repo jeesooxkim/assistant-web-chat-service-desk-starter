@@ -20,7 +20,7 @@ import { ErrorType } from '../../types/errors';
 import { ConnectToAgentItem, MessageInput, MessageOutput, MessageRequest, MessageResponse } from '../../types/message';
 import { User } from '../../types/profiles';
 import { ServiceDesk, ServiceDeskFactoryParameters, ServiceDeskStateFromWAC } from '../../types/serviceDesk';
-import { AgentProfile, ServiceDeskCallback } from '../../types/serviceDeskCallback';
+import { AgentProfile, AgentAvailability, ServiceDeskCallback } from '../../types/serviceDeskCallback';
 import {
   ChatBody,
   ChatResponse,
@@ -54,6 +54,7 @@ const OAUTH_API_CALLS_ENABLED = false;
 class GenesysServiceDesk implements ServiceDesk {
   agentProfile: AgentProfile;
   callback: ServiceDeskCallback;
+  agentAvailability: AgentAvailability;
   user: User;
 
   /**
@@ -87,6 +88,7 @@ class GenesysServiceDesk implements ServiceDesk {
   constructor(parameters: ServiceDeskFactoryParameters) {
     this.callback = parameters.callback;
     this.initialAgentJoined = false;
+    this.agentAvailability;
   }
   /**
    * Instructs the service desk to start a new chat. This should be called immediately after the service desk
@@ -337,11 +339,10 @@ class GenesysServiceDesk implements ServiceDesk {
                 if (!this.initialAgentJoined) this.initialAgentJoined = true;
               } else if (this.conversationUserId !== member) {
                 /**
-                 * If no agents have answered a call, the chat is connected to a dummy agent.
-                 * In that case, getAgentAvailability() sets the current wait time for web chat.
+                 * In that case, updateAgentAvailability() sets the current wait time for web chat.
                  */
                 try {
-                  if (OAUTH_API_CALLS_ENABLED) await this.getAgentAvailability();
+                  this.callback.updateAgentAvailability(this.agentAvailability);
                 } catch (error) {
                   console.error(error); // don't need to stop everything for an error here
                 }
@@ -514,9 +515,8 @@ class GenesysServiceDesk implements ServiceDesk {
     return `${messages.PREFIX_MESSAGE_TO_AGENT}\n${messages.SUMMARY(item.topic)}\n${messages.POSTFIX_MESSAGE_TO_AGENT}`;
   }
 
-  async getAgentAvailability(): Promise<any> {
+  async areAnyAgentsOnline(connectMessage: MessageResponse): Promise<boolean> {
     let availabilityRequest;
-    let agentAvailable: boolean;
 
     try {
       const env = await fetch(`${process.env.SERVER_BASE_URL}/setup`);
@@ -533,22 +533,17 @@ class GenesysServiceDesk implements ServiceDesk {
 
     const availability = await availabilityRequest.json();
 
-    // ETA is always > 0, this branch is never reached
+    // ETA is positive if agent is available
     if (availability.estimatedWaitTime < 0) {
-      this.callback.setErrorStatus({
-        logInfo: 'No agents are available to handle your request',
-        type: ErrorType.CONNECTING,
-      });
-      agentAvailable = false;
+      return Promise.resolve(false);
     } else {
-      this.callback.updateAgentAvailability({
-        estimated_wait_time: availability.estimatedWaitTime,
+      // Save availability for updateAgentAvailability callback function, which has
+      // rate limiting that prevents a consecutive calls.
+      this.agentAvailability = {
         position_in_queue: availability.positionInQueue,
-      });
-
-      agentAvailable = true;
+      };
+      return Promise.resolve(true);
     }
-    return Promise.resolve(agentAvailable);
   }
 }
 
